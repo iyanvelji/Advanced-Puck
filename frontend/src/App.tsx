@@ -11,6 +11,8 @@ import DivisionTable from "./components/DivisionTable";
 import PlayersView from "./components/PlayersView";
 import TeamDetailView from "./components/TeamDetailView";
 import PlayerDetailView from "./components/PlayerDetailView";
+import DonateBanner from "./components/DonateBanner";
+import DonatePage from "./components/DonatePage";
 
 const CONFERENCES: Conference[] = ["Eastern", "Western"];
 
@@ -24,6 +26,7 @@ export default function App() {
   const [selectedPlayerFromTeam, setSelectedPlayerFromTeam] = useState<
     number | null
   >(null);
+  const [showDonate, setShowDonate] = useState<boolean>(false);
   const [data, setData] = useState<StandingsResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
@@ -56,9 +59,15 @@ export default function App() {
   }, []);
 
   const handleSelectSection = (section: NavSection) => {
+    setShowDonate(false);
     setActiveSection(section);
     setSelectedTeamAbbrev(null);
     setSelectedPlayerFromTeam(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleOpenDonate = () => {
+    setShowDonate(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -86,8 +95,13 @@ export default function App() {
       />
 
       <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
-        {activeSection === "players" ? (
-          <PlayersView onBackToTeams={() => handleSelectSection("teams")} />
+        {showDonate ? (
+          <DonatePage onBack={() => setShowDonate(false)} />
+        ) : activeSection === "players" ? (
+          <PlayersView
+            onBackToTeams={() => handleSelectSection("teams")}
+            onOpenDonate={handleOpenDonate}
+          />
         ) : selectedPlayerFromTeam !== null && selectedTeamAbbrev ? (
           <PlayerDetailView
             playerId={selectedPlayerFromTeam}
@@ -102,6 +116,7 @@ export default function App() {
           />
         ) : (
           <>
+            <DonateBanner onOpenDonate={handleOpenDonate} className="mb-8" />
             {/* Current Season + Conference Tabs */}
             <div className="mb-8 overflow-hidden rounded-2xl border border-sky-500/20 bg-[#0b0f17]">
               <div className="border-b border-white/10 px-5 py-4">

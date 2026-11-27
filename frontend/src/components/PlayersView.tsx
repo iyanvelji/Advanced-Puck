@@ -9,9 +9,11 @@ import PlayerAvatar from "./PlayerAvatar";
 import PlayerLeaderboardCard from "./PlayerLeaderboardCard";
 import PlayerFullListView from "./PlayerFullListView";
 import PlayerDetailView from "./PlayerDetailView";
+import DonateBanner from "./DonateBanner";
 
 interface PlayersViewProps {
   onBackToTeams?: () => void;
+  onOpenDonate?: () => void;
 }
 
 const CATEGORY_TITLES: Record<PlayerCategoryKey, string> = {
@@ -22,7 +24,10 @@ const CATEGORY_TITLES: Record<PlayerCategoryKey, string> = {
   rookies: "Top Rookies by Points",
 };
 
-export default function PlayersView({ onBackToTeams }: PlayersViewProps) {
+export default function PlayersView({
+  onBackToTeams,
+  onOpenDonate,
+}: PlayersViewProps) {
   const [data, setData] = useState<PlayersLeadersResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -144,6 +149,8 @@ export default function PlayersView({ onBackToTeams }: PlayersViewProps) {
 
   return (
     <div className="space-y-8">
+      {onOpenDonate && <DonateBanner onOpenDonate={onOpenDonate} />}
+
       {/* Header Banner: "Player Stats" + Live Search Bar */}
       <div className="relative z-20 rounded-2xl border border-sky-500/20 bg-[#0b0f17] px-5 py-5 sm:px-6">
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px rounded-t-2xl bg-gradient-to-r from-transparent via-sky-400/60 to-transparent" />

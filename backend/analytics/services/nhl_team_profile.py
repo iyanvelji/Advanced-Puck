@@ -405,6 +405,8 @@ def _parse_person_bio(p: dict[str, Any]) -> dict[str, Any]:
 
 def fetch_team_profile(team_abbrev: str, season: str | None = None) -> dict[str, Any]:
     abbrev = team_abbrev.strip().upper()
+    if season is not None and not (season.isdigit() and len(season) == 8):
+        raise ValueError("Invalid season format.")
     cache_key = f"nhl_team_profile_v4_{abbrev}_{season or 'current'}"
     cached = cache.get(cache_key)
     if cached:

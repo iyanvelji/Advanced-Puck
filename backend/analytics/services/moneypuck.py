@@ -15,8 +15,8 @@ SITUATIONS = ("5on5", "all", "5on4", "4on5")
 
 
 def _season_year(season_id: str) -> str:
-    s = str(season_id or "20262027")
-    return s[:4] if len(s) >= 4 else "2026"
+    s = str(season_id or "20262027").strip()
+    return s[:4] if len(s) >= 4 and s[:4].isdigit() else "2026"
 
 
 def _data_dir(year: str) -> Path:
