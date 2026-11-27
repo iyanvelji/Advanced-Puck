@@ -22,8 +22,14 @@ load_dotenv(BASE_DIR / ".env")
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-insecure-local-key")
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "dev-only-local-key"
+    else:
+        raise RuntimeError("SECRET_KEY must be set when DEBUG is False.")
 
 ALLOWED_HOSTS = [
     h.strip()

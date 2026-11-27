@@ -1,11 +1,15 @@
-from typing import Dict, List, Optional
-from django.db.models import Max
+import hmac
+import os
+from typing import Any, Dict, List, Optional
+from django.core.cache import cache
+from django.db.models import Max, Q
 from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError
 from analytics.models import GoalieStat, SkaterStat, TeamStanding
-from typing import Any, Dict, List, Optional
-from django.db.models import Max, Q
+from analytics.services.moneypuck import refresh_all_moneypuck
 from analytics.services.nhl_player_profile import fetch_player_profile
+from analytics.services.nhl_players import fetch_and_store_players
+from analytics.services.nhl_standings import fetch_and_store_standings
 from analytics.services.nhl_team_profile import fetch_team_profile
 
 api = NinjaAPI(title="NHL Advanced Analytics API")
@@ -472,3 +476,28 @@ def get_team_detail(request, team_abbrev: str, season: Optional[str] = None):
         return fetch_team_profile(team_abbrev, season=season)
     except ValueError as exc:
         raise HttpError(404, str(exc))
+
+
+@api.post("/internal/ingest", response=Dict[str, Any])
+def trigger_nightly_ingest(request):
+    expected_secret = os.getenv("INGEST_SECRET", "")
+    provided_secret = request.headers.get("X-Ingest-Secret", "")
+
+    if not expected_secret or not hmac.compare_digest(provided_secret, expected_secret):
+        raise HttpError(403, "Invalid or missing ingest secret.")
+
+    standings_count = fetch_and_store_standings()
+    season_id, skater_count, rookie_count, goalie_count = fetch_and_store_players()
+    mp_counts = refresh_all_moneypuck(season_id)
+
+    cache.clear()
+
+    return {
+        "status": "ok",
+        "seasonId": season_id,
+        "standingsTeams": standings_count,
+        "skaters": skater_count,
+        "rookies": rookie_count,
+        "goalies": goalie_count,
+        "moneyPuck": mp_counts,
+    }

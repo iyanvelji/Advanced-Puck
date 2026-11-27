@@ -1,11 +1,15 @@
 import type { TeamProfileResponse } from "../types/teams";
+import { API_BASE } from "./config";
 
 export async function fetchTeamProfile(
   teamAbbrev: string,
 ): Promise<TeamProfileResponse> {
-  const response = await fetch(`/api/teams/${encodeURIComponent(teamAbbrev)}`, {
-    credentials: "include",
-  });
+  const response = await fetch(
+    `${API_BASE}/api/teams/${encodeURIComponent(teamAbbrev)}`,
+    {
+      credentials: "include",
+    },
+  );
 
   if (!response.ok) {
     throw new Error(

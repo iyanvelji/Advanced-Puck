@@ -5,9 +5,10 @@ import type {
   PlayerSearchResponse,
   PlayersLeadersResponse,
 } from "../types/players";
+import { API_BASE } from "./config";
 
 export async function fetchPlayerLeaders(): Promise<PlayersLeadersResponse> {
-  const response = await fetch("/api/players/leaders", {
+  const response = await fetch(`${API_BASE}/api/players/leaders`, {
     credentials: "include",
   });
   if (!response.ok) {
@@ -22,9 +23,12 @@ export async function fetchPlayerCategory(
 ): Promise<PlayerCategoryResponse> {
   const query =
     category === "goalies" ? `?qualified_only=${qualifiedOnly}` : "";
-  const response = await fetch(`/api/players/category/${category}${query}`, {
-    credentials: "include",
-  });
+  const response = await fetch(
+    `${API_BASE}/api/players/category/${category}${query}`,
+    {
+      credentials: "include",
+    },
+  );
   if (!response.ok) {
     throw new Error(`Failed to load ${category} list (${response.status})`);
   }
@@ -33,7 +37,7 @@ export async function fetchPlayerCategory(
 
 export async function searchPlayers(q: string): Promise<PlayerSearchResponse> {
   const response = await fetch(
-    `/api/players/search?q=${encodeURIComponent(q)}`,
+    `${API_BASE}/api/players/search?q=${encodeURIComponent(q)}`,
     { credentials: "include" },
   );
   if (!response.ok) {
@@ -45,7 +49,7 @@ export async function searchPlayers(q: string): Promise<PlayerSearchResponse> {
 export async function fetchPlayerProfile(
   playerId: number,
 ): Promise<PlayerProfileResponse> {
-  const response = await fetch(`/api/players/${playerId}`, {
+  const response = await fetch(`${API_BASE}/api/players/${playerId}`, {
     credentials: "include",
   });
   if (!response.ok) {
