@@ -1,0 +1,30 @@
+name: Nightly NHL & MoneyPuck Ingest
+
+on:
+  schedule:
+    # 12:05 AM MST (07:05 UTC). During summer MDT this runs at 1:05 AM MDT.
+    - cron: "5 7 * * *"
+  workflow_dispatch: # Lets you trigger a manual run anytime from the Actions tab
+
+jobs:
+  run-ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake Render backend
+        env:
+          RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
+        run: |
+          echo "Waking Render service..."
+          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors --max-time 30 \
+            "$RENDER_API_URL/api/standings" > /dev/null
+          echo "Backend is awake."
+
+      - name: Run standings, players, and MoneyPuck ingest
+        env:
+          RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: |
+          curl -sS --fail-with-body --max-time 180 \
+            -X POST "$RENDER_API_URL/api/internal/ingest" \
+            -H "X-Ingest-Secret: $INGEST_SECRET"
+          echo ""
