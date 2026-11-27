@@ -42,14 +42,9 @@ export default function PlayerMoneyPuckSection({
       <div className="relative overflow-hidden rounded-2xl border border-sky-500/25 bg-[#0b0f17] px-5 py-4 shadow-[0_12px_36px_rgba(0,0,0,0.65)]">
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-sky-400/60 to-transparent" />
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-sky-400">
-              Deep Expected Goals &amp; Micro-Stats
-            </p>
-            <h2 className="mt-0.5 text-lg font-bold text-white">
-              MoneyPuck Advanced Analytics
-            </h2>
-          </div>
+          <h2 className="text-lg font-bold text-white">
+            MoneyPuck Advanced Analytics
+          </h2>
 
           <div className="flex flex-wrap items-center gap-1.5">
             {SITUATION_OPTIONS.filter((opt) => data.situations[opt.key]).map(
@@ -148,21 +143,6 @@ export default function PlayerMoneyPuckSection({
           rows={active.charts.expectedVsActual}
         />
       </div>
-
-      {/* Required MoneyPuck Attribution */}
-      <p className="text-right text-xs text-zinc-500">
-        Advanced expected goals, danger-zone, and on/off-ice analytics provided
-        by{" "}
-        <a
-          href="https://moneypuck.com"
-          target="_blank"
-          rel="noreferrer"
-          className="text-sky-400/90 underline hover:text-sky-300"
-        >
-          MoneyPuck.com
-        </a>
-        .
-      </p>
     </div>
   );
 }

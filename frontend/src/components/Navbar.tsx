@@ -24,14 +24,20 @@ export default function Navbar({
     <header className="sticky top-0 z-30 border-b border-sky-500/15 bg-[#05070a]/90 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
         <div className="flex items-center gap-3">
-          <img
-            src={puckIcon}
-            alt="Advanced Puck"
-            className="h-9 w-9 rounded-xl border border-sky-400/40 object-cover shadow-[0_0_16px_rgba(56,189,248,0.2)]"
-          />
-          <span className="text-lg font-bold tracking-tight text-white">
-            Advanced Puck
-          </span>
+          <button
+            type="button"
+            onClick={() => onSelectSection("teams")}
+            className="flex cursor-pointer items-center gap-3 text-left transition-opacity hover:opacity-85"
+          >
+            <img
+              src={puckIcon}
+              alt="Advanced Puck"
+              className="h-9 w-9 rounded-xl border border-sky-400/40 object-cover shadow-[0_0_16px_rgba(56,189,248,0.2)]"
+            />
+            <span className="text-lg font-bold tracking-tight text-white">
+              Advanced Puck
+            </span>
+          </button>
         </div>
 
         <nav className="flex items-center gap-2">

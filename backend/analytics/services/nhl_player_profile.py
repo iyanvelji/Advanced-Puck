@@ -417,7 +417,7 @@ def _parse_goalie_edge(edge_raw: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def fetch_player_profile(player_id: int) -> dict[str, Any]:
-    cache_key = f"nhl_player_profile_v3_{player_id}"
+    cache_key = f"nhl_player_profile_v4_{player_id}"
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -710,14 +710,9 @@ def fetch_player_profile(player_id: int) -> dict[str, Any]:
                         ),
                     ),
                     _box(
-                        "Really Bad Starts",
-                        str(adv.get("reallyBadStarts", "—")),
-                        _nhl_pct(
-                            adv.get("reallyBadStarts"),
-                            "advanced",
-                            "reallyBadStarts",
-                            False,
-                        ),
+                        "Expected GAA",
+                        mp_all_bf.get("xgaa", "—"),
+                        mp_sits.get("all", {}).get("backfillRanks", {}).get("xgaa"),
                     ),
                     _box(
                         "Complete Games",

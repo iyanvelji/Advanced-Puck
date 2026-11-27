@@ -1081,6 +1081,7 @@ def _build_goalie_situation(
     gsax = xga - ga
     flurry_gsax = flurry_xga - ga
     gsax_60 = _per60(gsax, toi)
+    xgaa = _per60(xga, toi) if toi > 0 else None
 
     sog = _f(row, "ongoal")
     unblocked = _f(row, "unblocked_shot_attempts")
@@ -1463,6 +1464,7 @@ def _build_goalie_situation(
             "shotsAgainst": str(int(round(sog))),
             "goalsAgainst": str(int(round(ga))),
             "timeOnIce": toi,
+            "xgaa": f"{xgaa:.2f}" if xgaa is not None else "—",
         },
         "backfillRanks": {
             "savePct": _p(
@@ -1476,6 +1478,15 @@ def _build_goalie_situation(
             "shotsAgainst": _p(sog, lambda r: _f(r, "ongoal")),
             "goalsAgainst": _p(ga, lambda r: _f(r, "goals"), False),
             "timeOnIce": _p(toi, lambda r: _f(r, "icetime")),
+            "xgaa": _p(
+                xgaa,
+                lambda r: (
+                    _per60(_f(r, "xGoals"), _f(r, "icetime"))
+                    if _f(r, "icetime") > 0
+                    else None
+                ),
+                False,
+            ),
         },
     }
 

@@ -177,7 +177,7 @@ export default function PlayersView({ onBackToTeams }: PlayersViewProps) {
                   setSearchQuery(e.target.value);
                   setDropdownOpen(true);
                 }}
-                placeholder="Search players or teams..."
+                placeholder="Search players..."
                 className="w-full rounded-xl border border-sky-500/25 bg-[#05070a] py-2.5 pl-10 pr-9 text-sm text-white placeholder-zinc-500 transition focus:border-sky-400 focus:shadow-[0_0_18px_rgba(56,189,248,0.18)] focus:outline-none"
               />
               {searchQuery && (

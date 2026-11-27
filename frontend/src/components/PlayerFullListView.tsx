@@ -180,7 +180,7 @@ export default function PlayerFullListView({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search player or team..."
+              placeholder="Search players..."
               className="w-56 rounded-xl border border-white/10 bg-[#05070a] px-3.5 py-2 text-sm text-white placeholder-zinc-500 focus:border-sky-400 focus:outline-none"
             />
           </div>

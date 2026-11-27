@@ -59,6 +59,7 @@ export default function App() {
     setActiveSection(section);
     setSelectedTeamAbbrev(null);
     setSelectedPlayerFromTeam(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const handleOpenTeam = (teamAbbrev: string) => {
@@ -78,13 +79,13 @@ export default function App() {
   const hasTeams = divisionEntries.some(([, teams]) => teams.length > 0);
 
   return (
-    <div className="min-h-screen bg-[#05070a] text-white">
+    <div className="min-h-screen bg-[#05070a] flex-col text-white">
       <Navbar
         activeSection={activeSection}
         onSelectSection={handleSelectSection}
       />
 
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+      <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
         {activeSection === "players" ? (
           <PlayersView onBackToTeams={() => handleSelectSection("teams")} />
         ) : selectedPlayerFromTeam !== null && selectedTeamAbbrev ? (
@@ -175,6 +176,27 @@ export default function App() {
           </>
         )}
       </main>
+      <footer className="mx-auto w-full max-w-6xl border-t border-white/10 px-4 py-6 text-center text-xs text-zinc-500 sm:px-6 sm:text-right">
+        Stats and advanced stats provided by{" "}
+        <a
+          href="https://moneypuck.com"
+          target="_blank"
+          rel="noreferrer"
+          className="text-sky-400/90 underline hover:text-sky-300"
+        >
+          MoneyPuck.com
+        </a>{" "}
+        and{" "}
+        <a
+          href="https://www.nhl.com"
+          target="_blank"
+          rel="noreferrer"
+          className="text-sky-400/90 underline hover:text-sky-300"
+        >
+          NHL.com
+        </a>
+        . Created by Iyan Velji
+      </footer>
     </div>
   );
 }
