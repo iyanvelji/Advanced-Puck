@@ -211,6 +211,32 @@ def _league_rank(
     return None
 
 
+def _league_rank_fn(
+    rows: list[dict[str, Any]],
+    team_id: int | None,
+    extractor,
+    higher_is_better: bool = True,
+) -> int | None:
+    if team_id is None or not rows:
+        return None
+    scored: list[tuple[int, float]] = []
+    for r in rows:
+        tid = r.get("teamId")
+        val = extractor(r)
+        if tid is not None and val is not None:
+            try:
+                scored.append((int(tid), float(val)))
+            except (TypeError, ValueError):
+                continue
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[1], reverse=higher_is_better)
+    for idx, (tid, _) in enumerate(scored, start=1):
+        if tid == team_id:
+            return idx
+    return None
+
+
 def _fmt_record(w: Any, l: Any, otl: Any) -> str:
     if w is None and l is None:
         return "—"
@@ -379,7 +405,7 @@ def _parse_person_bio(p: dict[str, Any]) -> dict[str, Any]:
 
 def fetch_team_profile(team_abbrev: str, season: str | None = None) -> dict[str, Any]:
     abbrev = team_abbrev.strip().upper()
-    cache_key = f"nhl_team_profile_v2_{abbrev}_{season or 'current'}"
+    cache_key = f"nhl_team_profile_v4_{abbrev}_{season or 'current'}"
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -473,11 +499,15 @@ def fetch_team_profile(team_abbrev: str, season: str | None = None) -> dict[str,
         edge_comp = edge_comp_future.result() if edge_comp_future else {}
         money_puck = mp_future.result()
 
-    mp_backfill = (
-        (money_puck.get("situations") or {}).get("5on5", {}).get("backfill", {})
-        if money_puck
-        else {}
-    )
+    mp_sits = (money_puck.get("situations") or {}) if money_puck else {}
+    mp_s5_bf = mp_sits.get("5on5", {}).get("backfill", {})
+    mp_s5_rk = mp_sits.get("5on5", {}).get("backfillRanks", {})
+    mp_all_bf = mp_sits.get("all", {}).get("backfill", {})
+    mp_all_rk = mp_sits.get("all", {}).get("backfillRanks", {})
+    mp_pp_bf = mp_sits.get("5on4", {}).get("backfill", {})
+    mp_pp_rk = mp_sits.get("5on4", {}).get("backfillRanks", {})
+    mp_pk_bf = mp_sits.get("4on5", {}).get("backfill", {})
+    mp_pk_rk = mp_sits.get("4on5", {}).get("backfillRanks", {})
 
     # Extract this team's row from each league report
     summary_all = league_reports["summary"]
@@ -519,41 +549,70 @@ def fetch_team_profile(team_abbrev: str, season: str | None = None) -> dict[str,
     ga_pg = summary.get("goalsAgainstPerGame", round(ga / gp, 2) if gp else 0.0)
     diff_pg = round(diff / gp, 2) if gp else 0.0
 
+    def _rk(
+        rows: list[dict[str, Any]],
+        field: str,
+        higher: bool = True,
+        mp_rk_dict: dict[str, Any] | None = None,
+        mp_key: str | None = None,
+    ) -> str | None:
+        ord_rk = _ordinal(_league_rank(rows, team_id, field, higher))
+        if ord_rk:
+            return ord_rk
+        return mp_rk_dict.get(mp_key) if (mp_rk_dict and mp_key) else None
+
+    def _sit_rk(suffix: str) -> str | None:
+        def _pt_pct(r: dict[str, Any]) -> float | None:
+            w = r.get(f"wins{suffix}")
+            l = r.get(f"losses{suffix}")
+            ot = r.get(f"otLosses{suffix}")
+            if w is None and l is None:
+                return None
+            total = int(w or 0) + int(l or 0) + int(ot or 0)
+            return ((int(w or 0) * 2) + int(ot or 0)) / (2 * total) if total else None
+
+        return _ordinal(_league_rank_fn(sit_all, team_id, _pt_pct, True))
+
+    def _or_mp(primary: str, mp_dict: dict[str, Any], mp_key: str) -> str:
+        if primary and primary != "—":
+            return primary
+        return mp_dict.get(mp_key) or primary
+
+    def _box(
+        label: str,
+        value: str,
+        rank: str | None = None,
+        highlight: bool = False,
+    ) -> dict[str, Any]:
+        d: dict[str, Any] = {"label": label, "value": value, "rank": rank}
+        if highlight:
+            d["highlight"] = True
+        return d
+
     league_pts_rank = _league_rank(summary_all, team_id, "points", True)
-    gf_rank = _league_rank(summary_all, team_id, "goalsForPerGame", True)
-    ga_rank = _league_rank(summary_all, team_id, "goalsAgainstPerGame", False)
-    pp_rank = _league_rank(summary_all, team_id, "powerPlayPct", True)
-    pk_rank = _league_rank(summary_all, team_id, "penaltyKillPct", True)
-    sf_rank = _league_rank(summary_all, team_id, "shotsForPerGame", True)
-    sa_rank = _league_rank(summary_all, team_id, "shotsAgainstPerGame", False)
-    fo_rank = _league_rank(summary_all, team_id, "faceoffWinPct", True)
-    sat_rank = _league_rank(pct_all, team_id, "satPct", True)
-    usat_rank = _league_rank(pct_all, team_id, "usatPct", True)
-    hits_rank = _league_rank(rt_all, team_id, "hitsPer60", True)
-    blocks_rank = _league_rank(rt_all, team_id, "blockedShotsPer60", True)
-    pim_rank = _league_rank(pen_all, team_id, "penaltyMinutesPerGame", False)
 
     # Headline 6 KPIs
     headline_kpis = [
-        {"label": "Record", "value": f"{wins}-{losses}-{otl}"},
-        {
-            "label": "Points",
-            "value": str(pts),
-            "rank": _ordinal(league_pts_rank),
-            "highlight": True,
-        },
-        {"label": "Point %", "value": _fmt_pct(point_pct)},
-        {
-            "label": "GF / GP",
-            "value": _fmt_num(gf_pg, 2),
-            "rank": _ordinal(gf_rank),
-        },
-        {
-            "label": "GA / GP",
-            "value": _fmt_num(ga_pg, 2),
-            "rank": _ordinal(ga_rank),
-        },
-        {"label": "Goal Diff", "value": _fmt_num(diff, 0, signed=True)},
+        _box("Record", f"{wins}-{losses}-{otl}", _rk(summary_all, "wins")),
+        _box("Points", str(pts), _ordinal(league_pts_rank), highlight=True),
+        _box("Point %", _fmt_pct(point_pct), _rk(summary_all, "pointPct")),
+        _box("GF / GP", _fmt_num(gf_pg, 2), _rk(summary_all, "goalsForPerGame")),
+        _box(
+            "GA / GP",
+            _fmt_num(ga_pg, 2),
+            _rk(summary_all, "goalsAgainstPerGame", False),
+        ),
+        _box(
+            "Goal Diff",
+            _fmt_num(diff, 0, signed=True),
+            _ordinal(
+                _league_rank_fn(
+                    summary_all,
+                    team_id,
+                    lambda r: (r.get("goalsFor") or 0) - (r.get("goalsAgainst") or 0),
+                )
+            ),
+        ),
     ]
 
     # Compute PDO if present
@@ -563,297 +622,414 @@ def fetch_team_profile(team_abbrev: str, season: str | None = None) -> dict[str,
         p_num = float(pdo_raw)
         pdo_str = f"{p_num * 100:.1f}" if p_num <= 2.0 else f"{p_num:.1f}"
 
-    def _or_mp(primary: str, mp_key: str) -> str:
-        if primary and primary != "—":
-            return primary
-        return mp_backfill.get(mp_key) or primary
-
     # Categorized Stat Panels
+    diff_pg_rank = _ordinal(
+        _league_rank_fn(
+            summary_all,
+            team_id,
+            lambda r: (
+                ((r.get("goalsFor") or 0) - (r.get("goalsAgainst") or 0))
+                / max(1, r.get("gamesPlayed") or 1)
+            ),
+        )
+    )
+
     stat_groups = [
         {
             "title": "Offense & Scoring",
             "items": [
-                {"label": "Goals For", "value": str(gf), "highlight": True},
-                {
-                    "label": "GF / Game",
-                    "value": _fmt_num(gf_pg, 2),
-                    "rank": _ordinal(gf_rank),
-                },
-                {"label": "Goal Diff / GP", "value": _fmt_num(diff_pg, 2, signed=True)},
-                {
-                    "label": "Shots For / GP",
-                    "value": _fmt_num(summary.get("shotsForPerGame"), 1),
-                    "rank": _ordinal(sf_rank),
-                },
-                {
-                    "label": "5v5 Shooting %",
-                    "value": _fmt_pct(pct.get("shootingPct5v5")),
-                },
-                {"label": "5v5 Goals For", "value": str(period.get("evGoalsFor", "—"))},
-                {
-                    "label": "Regulation Wins",
-                    "value": str(summary.get("regulationWins", "—")),
-                },
-                {"label": "ROW", "value": str(summary.get("regulationAndOtWins", "—"))},
-                {
-                    "label": "Shootout Wins",
-                    "value": str(summary.get("winsInShootout", "—")),
-                },
-                {
-                    "label": "Empty-Net Goals",
-                    "value": str(rt.get("emptyNetGoals", "—")),
-                },
-                {"label": "Missed Shots", "value": str(rt.get("missedShots", "—"))},
-                {"label": "Giveaways", "value": str(rt.get("giveaways", "—"))},
+                _box(
+                    "Goals For",
+                    str(gf),
+                    _rk(summary_all, "goalsFor", True, mp_all_rk, "goalsFor"),
+                    True,
+                ),
+                _box(
+                    "GF / Game", _fmt_num(gf_pg, 2), _rk(summary_all, "goalsForPerGame")
+                ),
+                _box("Goal Diff / GP", _fmt_num(diff_pg, 2, signed=True), diff_pg_rank),
+                _box(
+                    "Shots For / GP",
+                    _fmt_num(summary.get("shotsForPerGame"), 1),
+                    _rk(summary_all, "shotsForPerGame"),
+                ),
+                _box(
+                    "5v5 Shooting %",
+                    _or_mp(_fmt_pct(pct.get("shootingPct5v5")), mp_s5_bf, "shPct5v5"),
+                    _rk(pct_all, "shootingPct5v5", True, mp_s5_rk, "shPct5v5"),
+                ),
+                _box(
+                    "5v5 Goals For",
+                    _or_mp(str(period.get("evGoalsFor", "—")), mp_s5_bf, "goalsFor"),
+                    _rk(period_all, "evGoalsFor", True, mp_s5_rk, "goalsFor"),
+                ),
+                _box(
+                    "xGF / Game",
+                    mp_all_bf.get("xgfPerGame", "—"),
+                    mp_all_rk.get("xgfPerGame"),
+                ),
+                _box(
+                    "ROW",
+                    str(summary.get("regulationAndOtWins", "—")),
+                    _rk(summary_all, "regulationAndOtWins"),
+                ),
+                _box(
+                    "Shootout Wins",
+                    str(summary.get("winsInShootout", "—")),
+                    _rk(summary_all, "winsInShootout"),
+                ),
+                _box(
+                    "Empty-Net Goals",
+                    str(rt.get("emptyNetGoals", "—")),
+                    _rk(rt_all, "emptyNetGoals"),
+                ),
+                _box(
+                    "Missed Shots",
+                    _or_mp(str(rt.get("missedShots", "—")), mp_all_bf, "missedShots"),
+                    _rk(rt_all, "missedShots", True, mp_all_rk, "missedShots"),
+                ),
+                _box(
+                    "Giveaways",
+                    _or_mp(str(rt.get("giveaways", "—")), mp_all_bf, "giveaways"),
+                    _rk(rt_all, "giveaways", False, mp_all_rk, "giveaways"),
+                ),
             ],
         },
         {
             "title": "Defense & Goaltending",
             "items": [
-                {"label": "Goals Against", "value": str(ga)},
-                {
-                    "label": "GA / Game",
-                    "value": _fmt_num(ga_pg, 2),
-                    "rank": _ordinal(ga_rank),
-                    "highlight": True,
-                },
-                {
-                    "label": "Shots Against / GP",
-                    "value": _fmt_num(summary.get("shotsAgainstPerGame"), 1),
-                    "rank": _ordinal(sa_rank),
-                },
-                {"label": "5v5 Save %", "value": _fmt_sv_pct(pct.get("savePct5v5"))},
-                {
-                    "label": "5v5 Goals Against",
-                    "value": str(period.get("evGoalsAgainst", "—")),
-                },
-                {"label": "Blocked Shots", "value": str(rt.get("blockedShots", "—"))},
-                {
-                    "label": "Blocks / 60",
-                    "value": _fmt_num(rt.get("blockedShotsPer60"), 1),
-                    "rank": _ordinal(blocks_rank),
-                },
-                {"label": "Takeaways", "value": str(rt.get("takeaways", "—"))},
-                {
-                    "label": "Takeaways / 60",
-                    "value": _fmt_num(rt.get("takeawaysPer60"), 1),
-                },
-                {"label": "Hits", "value": str(rt.get("hits", "—"))},
-                {
-                    "label": "Hits / 60",
-                    "value": _fmt_num(rt.get("hitsPer60"), 1),
-                    "rank": _ordinal(hits_rank),
-                },
-                {
-                    "label": "Giveaways / 60",
-                    "value": _fmt_num(rt.get("giveawaysPer60"), 1),
-                },
+                _box(
+                    "Goals Against",
+                    str(ga),
+                    _rk(summary_all, "goalsAgainst", False, mp_all_rk, "goalsAgainst"),
+                ),
+                _box(
+                    "GA / Game",
+                    _fmt_num(ga_pg, 2),
+                    _rk(summary_all, "goalsAgainstPerGame", False),
+                    True,
+                ),
+                _box(
+                    "Shots Against / GP",
+                    _fmt_num(summary.get("shotsAgainstPerGame"), 1),
+                    _rk(summary_all, "shotsAgainstPerGame", False),
+                ),
+                _box(
+                    "5v5 Save %",
+                    _or_mp(_fmt_sv_pct(pct.get("savePct5v5")), mp_s5_bf, "svPct5v5"),
+                    _rk(pct_all, "savePct5v5", True, mp_s5_rk, "svPct5v5"),
+                ),
+                _box(
+                    "5v5 Goals Against",
+                    _or_mp(
+                        str(period.get("evGoalsAgainst", "—")), mp_s5_bf, "goalsAgainst"
+                    ),
+                    _rk(period_all, "evGoalsAgainst", False, mp_s5_rk, "goalsAgainst"),
+                ),
+                _box(
+                    "Blocked Shots",
+                    _or_mp(str(rt.get("blockedShots", "—")), mp_all_bf, "blockedShots"),
+                    _rk(rt_all, "blockedShots", True, mp_all_rk, "blockedShots"),
+                ),
+                _box(
+                    "Blocks / 60",
+                    _or_mp(
+                        _fmt_num(rt.get("blockedShotsPer60"), 1),
+                        mp_all_bf,
+                        "blocksPer60",
+                    ),
+                    _rk(rt_all, "blockedShotsPer60", True, mp_all_rk, "blocksPer60"),
+                ),
+                _box(
+                    "Takeaways",
+                    _or_mp(str(rt.get("takeaways", "—")), mp_all_bf, "takeaways"),
+                    _rk(rt_all, "takeaways", True, mp_all_rk, "takeaways"),
+                ),
+                _box(
+                    "Takeaways / 60",
+                    _or_mp(
+                        _fmt_num(rt.get("takeawaysPer60"), 1),
+                        mp_all_bf,
+                        "takeawaysPer60",
+                    ),
+                    _rk(rt_all, "takeawaysPer60", True, mp_all_rk, "takeawaysPer60"),
+                ),
+                _box(
+                    "Hits",
+                    _or_mp(str(rt.get("hits", "—")), mp_all_bf, "hits"),
+                    _rk(rt_all, "hits", True, mp_all_rk, "hits"),
+                ),
+                _box(
+                    "Hits / 60",
+                    _or_mp(_fmt_num(rt.get("hitsPer60"), 1), mp_all_bf, "hitsPer60"),
+                    _rk(rt_all, "hitsPer60", True, mp_all_rk, "hitsPer60"),
+                ),
+                _box(
+                    "Giveaways / 60",
+                    _or_mp(
+                        _fmt_num(rt.get("giveawaysPer60"), 1),
+                        mp_all_bf,
+                        "giveawaysPer60",
+                    ),
+                    _rk(rt_all, "giveawaysPer60", False, mp_all_rk, "giveawaysPer60"),
+                ),
             ],
         },
         {
             "title": "Special Teams",
             "items": [
-                {
-                    "label": "Power Play %",
-                    "value": _fmt_pct(summary.get("powerPlayPct")),
-                    "rank": _ordinal(pp_rank),
-                    "highlight": True,
-                },
-                {
-                    "label": "Net PP %",
-                    "value": _fmt_pct(
-                        summary.get("powerPlayNetPct", pp.get("powerPlayNetPct"))
-                    ),
-                },
-                {"label": "PP Goals", "value": str(pp.get("powerPlayGoalsFor", "—"))},
-                {
-                    "label": "PP Opportunities",
-                    "value": str(pp.get("ppOpportunities", "—")),
-                },
-                {
-                    "label": "PP Opp / GP",
-                    "value": _fmt_num(pp.get("ppOpportunitiesPerGame"), 2),
-                },
-                {
-                    "label": "PP TOI / GP",
-                    "value": _fmt_toi(pp.get("ppTimeOnIcePerGame")),
-                },
-                {
-                    "label": "Penalty Kill %",
-                    "value": _fmt_pct(summary.get("penaltyKillPct")),
-                    "rank": _ordinal(pk_rank),
-                    "highlight": True,
-                },
-                {
-                    "label": "Net PK %",
-                    "value": _fmt_pct(
+                _box(
+                    "Power Play %",
+                    _fmt_pct(summary.get("powerPlayPct")),
+                    _rk(summary_all, "powerPlayPct"),
+                    True,
+                ),
+                _box(
+                    "Net PP %",
+                    _fmt_pct(summary.get("powerPlayNetPct", pp.get("powerPlayNetPct"))),
+                    _rk(pp_all, "powerPlayNetPct")
+                    or _rk(summary_all, "powerPlayNetPct"),
+                ),
+                _box(
+                    "PP Goals",
+                    _or_mp(str(pp.get("powerPlayGoalsFor", "—")), mp_pp_bf, "goalsFor"),
+                    _rk(pp_all, "powerPlayGoalsFor", True, mp_pp_rk, "goalsFor"),
+                ),
+                _box(
+                    "PP Opportunities",
+                    str(pp.get("ppOpportunities", "—")),
+                    _rk(pp_all, "ppOpportunities"),
+                ),
+                _box(
+                    "PP Opp / GP",
+                    _fmt_num(pp.get("ppOpportunitiesPerGame"), 2),
+                    _rk(pp_all, "ppOpportunitiesPerGame"),
+                ),
+                _box(
+                    "PP TOI / GP",
+                    _fmt_toi(pp.get("ppTimeOnIcePerGame")),
+                    _rk(pp_all, "ppTimeOnIcePerGame"),
+                ),
+                _box(
+                    "Penalty Kill %",
+                    _fmt_pct(summary.get("penaltyKillPct")),
+                    _rk(summary_all, "penaltyKillPct"),
+                    True,
+                ),
+                _box(
+                    "Net PK %",
+                    _fmt_pct(
                         summary.get("penaltyKillNetPct", pk.get("penaltyKillNetPct"))
                     ),
-                },
-                {
-                    "label": "Times Shorthanded",
-                    "value": str(pk.get("timesShorthanded", "—")),
-                },
-                {
-                    "label": "PP Goals Against",
-                    "value": str(pk.get("ppGoalsAgainst", "—")),
-                },
-                {"label": "SH Goals For", "value": str(pk.get("shGoalsFor", "—"))},
-                {
-                    "label": "SH Goals Against",
-                    "value": str(pp.get("shGoalsAgainst", "—")),
-                },
+                    _rk(pk_all, "penaltyKillNetPct")
+                    or _rk(summary_all, "penaltyKillNetPct"),
+                ),
+                _box(
+                    "Times Shorthanded",
+                    str(pk.get("timesShorthanded", "—")),
+                    _rk(pk_all, "timesShorthanded", False),
+                ),
+                _box(
+                    "PP Goals Against",
+                    _or_mp(
+                        str(pk.get("ppGoalsAgainst", "—")), mp_pk_bf, "goalsAgainst"
+                    ),
+                    _rk(pk_all, "ppGoalsAgainst", False, mp_pk_rk, "goalsAgainst"),
+                ),
+                _box(
+                    "SH Goals For",
+                    _or_mp(str(pk.get("shGoalsFor", "—")), mp_pk_bf, "goalsFor"),
+                    _rk(pk_all, "shGoalsFor", True, mp_pk_rk, "goalsFor"),
+                ),
+                _box(
+                    "SH Goals Against",
+                    _or_mp(
+                        str(pp.get("shGoalsAgainst", "—")), mp_pp_bf, "goalsAgainst"
+                    ),
+                    _rk(pp_all, "shGoalsAgainst", False, mp_pp_rk, "goalsAgainst"),
+                ),
             ],
         },
         {
             "title": "5v5 Possession & Shot Control",
             "items": [
-                {
-                    "label": "Corsi / SAT %",
-                    "value": _or_mp(_fmt_pct(pct.get("satPct")), "satPct"),
-                    "rank": _ordinal(sat_rank),
-                    "highlight": True,
-                },
-                {
-                    "label": "Fenwick / USAT %",
-                    "value": _or_mp(_fmt_pct(pct.get("usatPct")), "usatPct"),
-                    "rank": _ordinal(usat_rank),
-                },
-                {
-                    "label": "SAT % Close",
-                    "value": _or_mp(_fmt_pct(pct.get("satPctClose")), "satPctClose"),
-                },
-                {"label": "SAT % Tied", "value": _fmt_pct(pct.get("satPctTied"))},
-                {"label": "SAT % Leading", "value": _fmt_pct(pct.get("satPctAhead"))},
-                {"label": "SAT % Trailing", "value": _fmt_pct(pct.get("satPctBehind"))},
-                {
-                    "label": "SAT For",
-                    "value": _or_mp(str(rt.get("satFor", "—")), "satFor"),
-                },
-                {
-                    "label": "SAT Against",
-                    "value": _or_mp(str(rt.get("satAgainst", "—")), "satAgainst"),
-                },
-                {
-                    "label": "PDO (5v5)",
-                    "value": _or_mp(pdo_str, "pdo"),
-                    "highlight": True,
-                },
-                {
-                    "label": "5v5 Shooting %",
-                    "value": _or_mp(_fmt_pct(pct.get("shootingPct5v5")), "shPct5v5"),
-                },
-                {
-                    "label": "5v5 Save %",
-                    "value": _or_mp(_fmt_sv_pct(pct.get("savePct5v5")), "svPct5v5"),
-                },
-                {
-                    "label": "Total SAT",
-                    "value": _or_mp(str(rt.get("satTotal", "—")), "satTotal"),
-                },
+                _box(
+                    "Corsi / SAT %",
+                    _or_mp(_fmt_pct(pct.get("satPct")), mp_s5_bf, "satPct"),
+                    _rk(pct_all, "satPct", True, mp_s5_rk, "satPct"),
+                    True,
+                ),
+                _box(
+                    "Fenwick / USAT %",
+                    _or_mp(_fmt_pct(pct.get("usatPct")), mp_s5_bf, "usatPct"),
+                    _rk(pct_all, "usatPct", True, mp_s5_rk, "usatPct"),
+                ),
+                _box(
+                    "SAT % Close",
+                    _or_mp(_fmt_pct(pct.get("satPctClose")), mp_s5_bf, "satPctClose"),
+                    _rk(pct_all, "satPctClose", True, mp_s5_rk, "satPctClose"),
+                ),
+                _box(
+                    "SAT % Tied",
+                    _fmt_pct(pct.get("satPctTied")),
+                    _rk(pct_all, "satPctTied"),
+                ),
+                _box(
+                    "SAT % Leading",
+                    _fmt_pct(pct.get("satPctAhead")),
+                    _rk(pct_all, "satPctAhead"),
+                ),
+                _box(
+                    "SAT % Trailing",
+                    _fmt_pct(pct.get("satPctBehind")),
+                    _rk(pct_all, "satPctBehind"),
+                ),
+                _box(
+                    "SAT For",
+                    _or_mp(str(rt.get("satFor", "—")), mp_s5_bf, "satFor"),
+                    _rk(rt_all, "satFor", True, mp_s5_rk, "satFor"),
+                ),
+                _box(
+                    "SAT Against",
+                    _or_mp(str(rt.get("satAgainst", "—")), mp_s5_bf, "satAgainst"),
+                    _rk(rt_all, "satAgainst", False, mp_s5_rk, "satAgainst"),
+                ),
+                _box(
+                    "PDO (5v5)",
+                    _or_mp(pdo_str, mp_s5_bf, "pdo"),
+                    _rk(pct_all, "shootingPlusSavePct5v5", True, mp_s5_rk, "pdo"),
+                    True,
+                ),
+                _box(
+                    "5v5 Shooting %",
+                    _or_mp(_fmt_pct(pct.get("shootingPct5v5")), mp_s5_bf, "shPct5v5"),
+                    _rk(pct_all, "shootingPct5v5", True, mp_s5_rk, "shPct5v5"),
+                ),
+                _box(
+                    "5v5 Save %",
+                    _or_mp(_fmt_sv_pct(pct.get("savePct5v5")), mp_s5_bf, "svPct5v5"),
+                    _rk(pct_all, "savePct5v5", True, mp_s5_rk, "svPct5v5"),
+                ),
+                _box(
+                    "Total SAT",
+                    _or_mp(str(rt.get("satTotal", "—")), mp_s5_bf, "satTotal"),
+                    _rk(rt_all, "satTotal", True, mp_s5_rk, "satTotal"),
+                ),
             ],
         },
         {
             "title": "Faceoffs & Discipline",
             "items": [
-                {
-                    "label": "Faceoff Win %",
-                    "value": _fmt_pct(
-                        summary.get("faceoffWinPct", fo.get("faceoffWinPct"))
+                _box(
+                    "Faceoff Win %",
+                    _fmt_pct(summary.get("faceoffWinPct", fo.get("faceoffWinPct"))),
+                    _rk(summary_all, "faceoffWinPct") or _rk(fo_all, "faceoffWinPct"),
+                    True,
+                ),
+                _box(
+                    "EV Faceoff %",
+                    _fmt_pct(fo.get("evFaceoffPct")),
+                    _rk(fo_all, "evFaceoffPct"),
+                ),
+                _box(
+                    "PP Faceoff %",
+                    _fmt_pct(fo.get("ppFaceoffPct")),
+                    _rk(fo_all, "ppFaceoffPct"),
+                ),
+                _box(
+                    "SH Faceoff %",
+                    _fmt_pct(fo.get("shFaceoffPct")),
+                    _rk(fo_all, "shFaceoffPct"),
+                ),
+                _box(
+                    "Offensive Zone FO%",
+                    _fmt_pct(fo.get("offensiveZoneFaceoffPct")),
+                    _rk(fo_all, "offensiveZoneFaceoffPct"),
+                ),
+                _box(
+                    "Defensive Zone FO%",
+                    _fmt_pct(fo.get("defensiveZoneFaceoffPct")),
+                    _rk(fo_all, "defensiveZoneFaceoffPct"),
+                ),
+                _box(
+                    "Penalty Minutes",
+                    _or_mp(str(pen.get("penaltyMinutes", "—")), mp_all_bf, "pim"),
+                    _rk(pen_all, "penaltyMinutes", False, mp_all_rk, "pim"),
+                ),
+                _box(
+                    "PIM Drawn",
+                    mp_all_bf.get("pimDrawn", "—"),
+                    mp_all_rk.get("pimDrawn"),
+                ),
+                _box(
+                    "Penalties Drawn",
+                    _or_mp(
+                        str(pen.get("penaltiesDrawn", "—")), mp_all_bf, "penaltiesDrawn"
                     ),
-                    "rank": _ordinal(fo_rank),
-                    "highlight": True,
-                },
-                {"label": "EV Faceoff %", "value": _fmt_pct(fo.get("evFaceoffPct"))},
-                {"label": "PP Faceoff %", "value": _fmt_pct(fo.get("ppFaceoffPct"))},
-                {"label": "SH Faceoff %", "value": _fmt_pct(fo.get("shFaceoffPct"))},
-                {
-                    "label": "Offensive Zone FO%",
-                    "value": _fmt_pct(fo.get("offensiveZoneFaceoffPct")),
-                },
-                {
-                    "label": "Defensive Zone FO%",
-                    "value": _fmt_pct(fo.get("defensiveZoneFaceoffPct")),
-                },
-                {
-                    "label": "Penalty Minutes",
-                    "value": str(pen.get("penaltyMinutes", "—")),
-                },
-                {
-                    "label": "PIM / Game",
-                    "value": _fmt_num(pen.get("penaltyMinutesPerGame"), 1),
-                    "rank": _ordinal(pim_rank),
-                },
-                {
-                    "label": "Penalties Drawn",
-                    "value": str(pen.get("penaltiesDrawn", "—")),
-                },
-                {
-                    "label": "Penalties Taken",
-                    "value": str(pen.get("penaltiesTaken", "—")),
-                },
-                {
-                    "label": "Net Penalties",
-                    "value": _fmt_num(pen.get("netPenalties"), 0, signed=True),
-                },
-                {
-                    "label": "Net Pen / 60",
-                    "value": _fmt_num(pen.get("netPenaltiesPer60"), 2, signed=True),
-                },
+                    _rk(pen_all, "penaltiesDrawn", True, mp_all_rk, "penaltiesDrawn"),
+                ),
+                _box(
+                    "Penalties Taken",
+                    _or_mp(
+                        str(pen.get("penaltiesTaken", "—")), mp_all_bf, "penaltiesTaken"
+                    ),
+                    _rk(pen_all, "penaltiesTaken", False, mp_all_rk, "penaltiesTaken"),
+                ),
+                _box(
+                    "Net Penalties",
+                    _or_mp(
+                        _fmt_num(pen.get("netPenalties"), 0, signed=True),
+                        mp_all_bf,
+                        "netPenalties",
+                    ),
+                    _rk(pen_all, "netPenalties", True, mp_all_rk, "netPenalties"),
+                ),
+                _box(
+                    "Net Pen / 60",
+                    _fmt_num(pen.get("netPenaltiesPer60"), 2, signed=True),
+                    _rk(pen_all, "netPenaltiesPer60"),
+                ),
             ],
         },
         {
             "title": "Situational Records",
             "items": [
-                {
-                    "label": "Scoring First",
-                    "value": _fmt_record(
-                        sit.get("winsScoringFirst"),
-                        sit.get("lossesScoringFirst"),
-                        sit.get("otLossesScoringFirst"),
-                    ),
-                    "highlight": True,
-                },
-                {
-                    "label": "Trailing First",
-                    "value": _fmt_record(
-                        sit.get("winsTrailingFirst"),
-                        sit.get("lossesTrailingFirst"),
-                        sit.get("otLossesTrailingFirst"),
-                    ),
-                },
-                {
-                    "label": "Leading After 1st",
-                    "value": _fmt_record(
+                _box(
+                    "Leading After 1st",
+                    _fmt_record(
                         sit.get("winsLeadPeriod1"),
                         sit.get("lossesLeadPeriod1"),
                         sit.get("otLossesLeadPeriod1"),
                     ),
-                },
-                {
-                    "label": "Trailing After 1st",
-                    "value": _fmt_record(
+                    _sit_rk("LeadPeriod1"),
+                ),
+                _box(
+                    "Trailing After 1st",
+                    _fmt_record(
                         sit.get("winsTrailPeriod1"),
                         sit.get("lossesTrailPeriod1"),
                         sit.get("otLossesTrailPeriod1"),
                     ),
-                },
-                {
-                    "label": "Leading After 2nd",
-                    "value": _fmt_record(
+                    _sit_rk("TrailPeriod1"),
+                ),
+                _box(
+                    "Leading After 2nd",
+                    _fmt_record(
                         sit.get("winsLeadPeriod2"),
                         sit.get("lossesLeadPeriod2"),
                         sit.get("otLossesLeadPeriod2"),
                     ),
-                },
-                {
-                    "label": "Trailing After 2nd",
-                    "value": _fmt_record(
+                    _sit_rk("LeadPeriod2"),
+                ),
+                _box(
+                    "Trailing After 2nd",
+                    _fmt_record(
                         sit.get("winsTrailPeriod2"),
                         sit.get("lossesTrailPeriod2"),
                         sit.get("otLossesTrailPeriod2"),
                     ),
-                },
+                    _sit_rk("TrailPeriod2"),
+                ),
             ],
         },
     ]

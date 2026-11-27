@@ -89,6 +89,7 @@ export interface PlayerStatItem {
   label: string;
   value: string;
   highlight?: boolean;
+  rank?: string | null;
 }
 
 export interface PlayerStatGroup {

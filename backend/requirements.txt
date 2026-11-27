@@ -1,0 +1,9 @@
+django
+django-ninja
+django-cors-headers
+httpx
+python-dotenv
+dj-database-url
+psycopg[binary]
+gunicorn
+whitenoise

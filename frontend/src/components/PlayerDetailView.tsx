@@ -250,6 +250,11 @@ export default function PlayerDetailView({
                 >
                   {kpi.value}
                 </p>
+                {kpi.rank && (
+                  <p className="mt-0.5 text-[11px] font-medium text-sky-300/80">
+                    {kpi.rank}
+                  </p>
+                )}
               </div>
             ))}
           </div>
@@ -308,7 +313,16 @@ export default function PlayerDetailView({
                       key={item.label}
                       className="rounded-xl border border-white/5 bg-black/45 px-3.5 py-3 tabular-nums"
                     >
-                      <p className="text-[11px] text-zinc-400">{item.label}</p>
+                      <div className="flex items-start justify-between gap-1">
+                        <p className="text-[11px] text-zinc-400">
+                          {item.label}
+                        </p>
+                        {item.rank && (
+                          <span className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
+                            {item.rank}
+                          </span>
+                        )}
+                      </div>
                       <p
                         className={`mt-1 text-lg font-bold ${
                           item.highlight

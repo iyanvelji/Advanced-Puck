@@ -1,4 +1,5 @@
 import type { NavSection } from "../types/standings";
+import puckIcon from "../assets/puck.jpg";
 
 interface NavbarProps {
   activeSection: NavSection;
@@ -23,17 +24,14 @@ export default function Navbar({
     <header className="sticky top-0 z-30 border-b border-sky-500/15 bg-[#05070a]/90 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-sky-400/40 bg-sky-500/10 text-sm font-bold tracking-wider text-sky-400 shadow-[0_0_16px_rgba(56,189,248,0.2)]">
-            ICE
-          </div>
-          <div>
-            <p className="text-sm font-semibold tracking-wide text-white sm:text-base">
-              NHL Advanced Analytics
-            </p>
-            <p className="text-[11px] uppercase tracking-[0.18em] text-sky-400/80">
-              Division Standings &amp; Metrics
-            </p>
-          </div>
+          <img
+            src={puckIcon}
+            alt="Advanced Puck"
+            className="h-9 w-9 rounded-xl border border-sky-400/40 object-cover shadow-[0_0_16px_rgba(56,189,248,0.2)]"
+          />
+          <span className="text-lg font-bold tracking-tight text-white">
+            Advanced Puck
+          </span>
         </div>
 
         <nav className="flex items-center gap-2">

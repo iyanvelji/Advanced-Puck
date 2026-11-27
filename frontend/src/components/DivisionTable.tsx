@@ -93,7 +93,7 @@ export default function DivisionTable({
   };
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-sky-500/20 bg-[#0b0f17] shadow-[0_12px_40px_rgba(0,0,0,0.65)]">
+    <section className="[container-type:inline-size] overflow-hidden w-full rounded-2xl border border-sky-500/20 bg-[#0b0f17] shadow-[0_12px_40px_rgba(0,0,0,0.65)]">
       {/* Division Card Header */}
       <div className="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-sky-500/10 via-transparent to-transparent px-5 py-4">
         <h2 className="text-lg font-bold tracking-tight text-white">

@@ -4,7 +4,11 @@ from typing import Any
 import httpx
 from django.core.cache import cache
 from analytics.models import GoalieStat, SkaterStat, TeamStanding
-from analytics.services.moneypuck import get_goalie_moneypuck, get_skater_moneypuck
+from analytics.services.moneypuck import (
+    get_goalie_moneypuck,
+    get_skater_league_distributions,
+    get_skater_moneypuck,
+)
 
 NHL_WEB_API_BASE = "https://api-web.nhle.com"
 NHL_STATS_API_BASE = "https://api.nhle.com/stats/rest/en"
@@ -115,6 +119,66 @@ def _fetch_stats_report(
     )
     rows = payload.get("data", [])
     return rows[0] if rows else {}
+
+
+def _fetch_league_report(
+    role: str, report: str, season_id: str
+) -> list[dict[str, Any]]:
+    """Fetch and cache (1 hr) all regular-season league rows for a player report."""
+    key = f"nhl_league_rep_v1_{season_id}_{role}_{report}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    rows: list[dict[str, Any]] = []
+    start = 0
+    url = f"{NHL_STATS_API_BASE}/{role}/{report}"
+    try:
+        with httpx.Client(follow_redirects=True, timeout=15.0) as client:
+            while True:
+                resp = client.get(
+                    url,
+                    params={
+                        "isAggregate": "false",
+                        "isGame": "false",
+                        "cayenneExp": f"seasonId={season_id} and gameTypeId=2",
+                        "start": start,
+                        "limit": 100,
+                    },
+                )
+                if resp.status_code != 200:
+                    break
+                payload = resp.json()
+                batch = payload.get("data") or []
+                total = int(payload.get("total") or 0)
+                if not batch:
+                    break
+                rows.extend(batch)
+                start += len(batch)
+                if (total and start >= total) or len(batch) < 100:
+                    break
+    except (httpx.HTTPError, ValueError):
+        pass
+
+    if rows:
+        cache.set(key, rows, 3600)
+    return rows
+
+
+def _pctile_str(
+    val: float | int | None, pop: list[float], higher_is_better: bool = True
+) -> str | None:
+    if val is None or not pop:
+        return None
+    v = float(val)
+    if higher_is_better:
+        below = sum(1 for x in pop if x < v)
+        equal = sum(1 for x in pop if x == v)
+    else:
+        below = sum(1 for x in pop if x > v)
+        equal = sum(1 for x in pop if x == v)
+    pct = max(1, min(99, int(round(((below + 0.5 * equal) / len(pop)) * 100.0))))
+    return f"{pct}%ile"
 
 
 def _resolve_active_season(landing: dict[str, Any]) -> str:
@@ -353,7 +417,7 @@ def _parse_goalie_edge(edge_raw: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def fetch_player_profile(player_id: int) -> dict[str, Any]:
-    cache_key = f"nhl_player_profile_v2_{player_id}"
+    cache_key = f"nhl_player_profile_v3_{player_id}"
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -387,6 +451,11 @@ def fetch_player_profile(player_id: int) -> dict[str, Any]:
                 )
                 for name in ("summary", "advanced", "savesByStrength")
             }
+            league_futures = {
+                name: pool.submit(_fetch_league_report, "goalie", name, active_season)
+                for name in ("summary", "advanced", "savesByStrength")
+            }
+            mp_dists_future = None
         else:
             edge_future = pool.submit(
                 _safe_get_json,
@@ -406,17 +475,66 @@ def fetch_player_profile(player_id: int) -> dict[str, Any]:
                     "penaltykill",
                 )
             }
+            league_futures = {
+                name: pool.submit(_fetch_league_report, "skater", name, active_season)
+                for name in ("summary", "realtime")
+            }
+            mp_dists_future = pool.submit(
+                get_skater_league_distributions, active_season
+            )
 
         gamelog_raw = gamelog_future.result()
         edge_raw = edge_future.result()
         reports = {name: fut.result() for name, fut in report_futures.items()}
         money_puck = mp_future.result()
+        league_reports = {name: fut.result() for name, fut in league_futures.items()}
+        mp_dists = mp_dists_future.result() if mp_dists_future else {}
 
-    mp_backfill = (
-        (money_puck.get("situations") or {}).get("5on5", {}).get("backfill", {})
-        if money_puck
-        else {}
-    )
+    mp_sits = (money_puck.get("situations") or {}) if money_puck else {}
+
+    mp_s5_bf = mp_sits.get("5on5", {}).get("backfill", {})
+    mp_s5_rk = mp_sits.get("5on5", {}).get("backfillRanks", {})
+    mp_all_bf = mp_sits.get("all", {}).get("backfill", {})
+    mp_pp_bf = mp_sits.get("5on4", {}).get("backfill", {})
+    mp_pk_bf = mp_sits.get("4on5", {}).get("backfill", {})
+
+    def _box(
+        label: str,
+        value: str,
+        rank: str | None = None,
+        highlight: bool = False,
+    ) -> dict[str, Any]:
+        d: dict[str, Any] = {"label": label, "value": value, "rank": rank}
+        if highlight:
+            d["highlight"] = True
+        return d
+
+    def _nhl_pct(
+        val: float | int | None,
+        rep_name: str,
+        field: str,
+        higher: bool = True,
+        min_gp: int = 0,
+        min_shots: int = 0,
+    ) -> str | None:
+        if val is None:
+            return None
+        rows = league_reports.get(rep_name) or []
+        pop = [
+            float(r[field])
+            for r in rows
+            if r.get(field) is not None
+            and (r.get("gamesPlayed") or 0) >= min_gp
+            and (r.get("shots") or 0) >= min_shots
+        ]
+        if len(pop) < 10:
+            pop = [float(r[field]) for r in rows if r.get(field) is not None]
+        return _pctile_str(val, pop, higher)
+
+    def _dist_pct(
+        val: float | int | None, dist_key: str, higher: bool = True
+    ) -> str | None:
+        return _pctile_str(val, mp_dists.get(dist_key) or [], higher)
 
     # Core bio
     first_name = (landing.get("firstName") or {}).get("default", "")
@@ -462,127 +580,318 @@ def fetch_player_profile(player_id: int) -> dict[str, Any]:
         so = summary.get("shutouts", featured_reg.get("shutouts", 0))
         sa = summary.get("shotsAgainst", 0)
 
-        headline_kpis = [
-            {"label": "GP", "value": str(gp)},
-            {"label": "Record", "value": f"{wins}-{losses}-{otl}"},
-            {"label": "SV%", "value": _fmt_sv_pct(sv_pct), "highlight": True},
-            {"label": "GAA", "value": f"{float(gaa):.2f}" if gaa is not None else "—"},
-            {"label": "Shutouts", "value": str(so)},
-            {"label": "Shots Against", "value": str(sa)},
+        gl_win_pct = (wins / gp) if gp else None
+        gl_win_pop = [
+            float(r["wins"]) / float(r["gamesPlayed"])
+            for r in (league_reports.get("summary") or [])
+            if (r.get("gamesPlayed") or 0) >= 3 and r.get("wins") is not None
         ]
+
+        def _g_or_mp(primary: str, mp_d: dict[str, Any], key: str) -> str:
+            return (
+                primary if (primary and primary != "—") else (mp_d.get(key) or primary)
+            )
+
+        headline_kpis = [
+            _box("GP", str(gp), _nhl_pct(gp, "summary", "gamesPlayed")),
+            _box(
+                "Record", f"{wins}-{losses}-{otl}", _pctile_str(gl_win_pct, gl_win_pop)
+            ),
+            _box(
+                "SV%",
+                _fmt_sv_pct(sv_pct),
+                _nhl_pct(sv_pct, "summary", "savePct", True, min_gp=3),
+                True,
+            ),
+            _box(
+                "GAA",
+                f"{float(gaa):.2f}" if gaa is not None else "—",
+                _nhl_pct(gaa, "summary", "goalsAgainstAverage", False, min_gp=3),
+            ),
+            _box("Shutouts", str(so), _nhl_pct(so, "summary", "shutouts")),
+            _box("Shots Against", str(sa), _nhl_pct(sa, "summary", "shotsAgainst")),
+        ]
+
+        toi_val = (
+            summary.get("timeOnIce")
+            if summary.get("timeOnIce") is not None
+            else mp_all_bf.get("timeOnIce")
+        )
+        ev_sv_str = _g_or_mp(_fmt_sv_pct(by_str.get("evSavePct")), mp_s5_bf, "savePct")
+        pp_sv_str = _g_or_mp(_fmt_sv_pct(by_str.get("ppSavePct")), mp_pk_bf, "savePct")
+        sh_sv_str = _g_or_mp(_fmt_sv_pct(by_str.get("shSavePct")), mp_pp_bf, "savePct")
 
         stat_groups = [
             {
                 "title": "Season Goaltending",
                 "items": [
-                    {"label": "Games Played", "value": str(gp)},
-                    {
-                        "label": "Games Started",
-                        "value": str(summary.get("gamesStarted", "—")),
-                    },
-                    {"label": "Wins", "value": str(wins)},
-                    {"label": "Losses", "value": str(losses)},
-                    {"label": "OT Losses", "value": str(otl)},
-                    {
-                        "label": "Save %",
-                        "value": _fmt_sv_pct(sv_pct),
-                        "highlight": True,
-                    },
-                    {
-                        "label": "GAA",
-                        "value": f"{float(gaa):.2f}" if gaa is not None else "—",
-                    },
-                    {"label": "Shutouts", "value": str(so)},
-                    {"label": "Saves", "value": str(summary.get("saves", "—"))},
-                    {"label": "Shots Against", "value": str(sa)},
-                    {
-                        "label": "Goals Against",
-                        "value": str(summary.get("goalsAgainst", "—")),
-                    },
-                    {"label": "Total TOI", "value": _fmt_toi(summary.get("timeOnIce"))},
+                    _box(
+                        "Games Played", str(gp), _nhl_pct(gp, "summary", "gamesPlayed")
+                    ),
+                    _box(
+                        "Games Started",
+                        str(summary.get("gamesStarted", "—")),
+                        _nhl_pct(
+                            summary.get("gamesStarted"), "summary", "gamesStarted"
+                        ),
+                    ),
+                    _box("Wins", str(wins), _nhl_pct(wins, "summary", "wins")),
+                    _box(
+                        "Losses",
+                        str(losses),
+                        _nhl_pct(losses, "summary", "losses", False),
+                    ),
+                    _box(
+                        "OT Losses",
+                        str(otl),
+                        _nhl_pct(otl, "summary", "otLosses", False),
+                    ),
+                    _box(
+                        "Save %",
+                        _fmt_sv_pct(sv_pct),
+                        _nhl_pct(sv_pct, "summary", "savePct", True, min_gp=3),
+                        True,
+                    ),
+                    _box(
+                        "GAA",
+                        f"{float(gaa):.2f}" if gaa is not None else "—",
+                        _nhl_pct(
+                            gaa, "summary", "goalsAgainstAverage", False, min_gp=3
+                        ),
+                    ),
+                    _box("Shutouts", str(so), _nhl_pct(so, "summary", "shutouts")),
+                    _box(
+                        "Saves",
+                        str(summary.get("saves", "—")),
+                        _nhl_pct(summary.get("saves"), "summary", "saves"),
+                    ),
+                    _box(
+                        "Shots Against",
+                        str(sa),
+                        _nhl_pct(sa, "summary", "shotsAgainst"),
+                    ),
+                    _box(
+                        "Goals Against",
+                        str(summary.get("goalsAgainst", "—")),
+                        _nhl_pct(
+                            summary.get("goalsAgainst"),
+                            "summary",
+                            "goalsAgainst",
+                            False,
+                        ),
+                    ),
+                    _box(
+                        "Total TOI",
+                        _fmt_toi(toi_val),
+                        _nhl_pct(summary.get("timeOnIce"), "summary", "timeOnIce")
+                        or mp_sits.get("all", {})
+                        .get("backfillRanks", {})
+                        .get("timeOnIce"),
+                    ),
                 ],
             },
             {
                 "title": "Advanced Quality & Workload",
                 "items": [
-                    {
-                        "label": "Quality Starts",
-                        "value": str(adv.get("qualityStart", "—")),
-                    },
-                    {
-                        "label": "Quality Start %",
-                        "value": _fmt_pct(adv.get("qualityStartsPct")),
-                    },
-                    {
-                        "label": "Really Bad Starts",
-                        "value": str(adv.get("reallyBadStarts", "—")),
-                    },
-                    {
-                        "label": "Complete Games",
-                        "value": str(adv.get("completeGames", "—")),
-                    },
-                    {
-                        "label": "Complete Game %",
-                        "value": _fmt_pct(adv.get("completeGamePct")),
-                    },
-                    {
-                        "label": "Shots Against / 60",
-                        "value": (
-                            f"{float(adv['shotsAgainstPer60']):.1f}"
-                            if adv.get("shotsAgainstPer60") is not None
-                            else "—"
+                    _box(
+                        "Quality Starts",
+                        str(adv.get("qualityStart", "—")),
+                        _nhl_pct(adv.get("qualityStart"), "advanced", "qualityStart"),
+                    ),
+                    _box(
+                        "Quality Start %",
+                        _fmt_pct(adv.get("qualityStartsPct")),
+                        _nhl_pct(
+                            adv.get("qualityStartsPct"),
+                            "advanced",
+                            "qualityStartsPct",
+                            True,
+                            min_gp=3,
                         ),
-                    },
-                    {
-                        "label": "Goal Support Avg",
-                        "value": (
-                            f"{float(adv['goalsForAverage']):.2f}"
-                            if adv.get("goalsForAverage") is not None
-                            else "—"
+                    ),
+                    _box(
+                        "Really Bad Starts",
+                        str(adv.get("reallyBadStarts", "—")),
+                        _nhl_pct(
+                            adv.get("reallyBadStarts"),
+                            "advanced",
+                            "reallyBadStarts",
+                            False,
                         ),
-                    },
-                    {
-                        "label": "Regulation Wins",
-                        "value": str(adv.get("regulationWins", "—")),
-                    },
+                    ),
+                    _box(
+                        "Complete Games",
+                        str(adv.get("completeGames", "—")),
+                        _nhl_pct(adv.get("completeGames"), "advanced", "completeGames"),
+                    ),
+                    _box(
+                        "Complete Game %",
+                        _fmt_pct(adv.get("completeGamePct")),
+                        _nhl_pct(
+                            adv.get("completeGamePct"),
+                            "advanced",
+                            "completeGamePct",
+                            True,
+                            min_gp=3,
+                        ),
+                    ),
+                    _box(
+                        "Shots Against / 60",
+                        f"{float(adv['shotsAgainstPer60']):.1f}"
+                        if adv.get("shotsAgainstPer60") is not None
+                        else "—",
+                        _nhl_pct(
+                            adv.get("shotsAgainstPer60"),
+                            "advanced",
+                            "shotsAgainstPer60",
+                            False,
+                            min_gp=3,
+                        ),
+                    ),
+                    _box(
+                        "Goal Support Avg",
+                        f"{float(adv['goalsForAverage']):.2f}"
+                        if adv.get("goalsForAverage") is not None
+                        else "—",
+                        _nhl_pct(
+                            adv.get("goalsForAverage"),
+                            "advanced",
+                            "goalsForAverage",
+                            True,
+                            min_gp=3,
+                        ),
+                    ),
+                    _box(
+                        "Regulation Wins",
+                        str(adv.get("regulationWins", "—")),
+                        _nhl_pct(
+                            adv.get("regulationWins"), "advanced", "regulationWins"
+                        ),
+                    ),
                 ],
             },
             {
                 "title": "Saves by Strength State",
                 "items": [
-                    {
-                        "label": "Even Strength SV%",
-                        "value": _fmt_sv_pct(by_str.get("evSavePct")),
-                        "highlight": True,
-                    },
-                    {
-                        "label": "EV Shots Against",
-                        "value": str(by_str.get("evShotsAgainst", "—")),
-                    },
-                    {
-                        "label": "EV Goals Against",
-                        "value": str(by_str.get("evGoalsAgainst", "—")),
-                    },
-                    {
-                        "label": "Power Play SV%",
-                        "value": _fmt_sv_pct(by_str.get("ppSavePct")),
-                    },
-                    {
-                        "label": "PP Shots Against",
-                        "value": str(by_str.get("ppShotsAgainst", "—")),
-                    },
-                    {
-                        "label": "PP Goals Against",
-                        "value": str(by_str.get("ppGoalsAgainst", "—")),
-                    },
-                    {
-                        "label": "Shorthanded SV%",
-                        "value": _fmt_sv_pct(by_str.get("shSavePct")),
-                    },
-                    {
-                        "label": "SH Shots Against",
-                        "value": str(by_str.get("shShotsAgainst", "—")),
-                    },
+                    _box(
+                        "Even Strength SV%",
+                        ev_sv_str,
+                        _nhl_pct(
+                            by_str.get("evSavePct"),
+                            "savesByStrength",
+                            "evSavePct",
+                            True,
+                            min_gp=3,
+                        )
+                        or mp_s5_rk.get("savePct"),
+                        True,
+                    ),
+                    _box(
+                        "EV Shots Against",
+                        _g_or_mp(
+                            str(by_str.get("evShotsAgainst", "—")),
+                            mp_s5_bf,
+                            "shotsAgainst",
+                        ),
+                        _nhl_pct(
+                            by_str.get("evShotsAgainst"),
+                            "savesByStrength",
+                            "evShotsAgainst",
+                        )
+                        or mp_s5_rk.get("shotsAgainst"),
+                    ),
+                    _box(
+                        "EV Goals Against",
+                        _g_or_mp(
+                            str(by_str.get("evGoalsAgainst", "—")),
+                            mp_s5_bf,
+                            "goalsAgainst",
+                        ),
+                        _nhl_pct(
+                            by_str.get("evGoalsAgainst"),
+                            "savesByStrength",
+                            "evGoalsAgainst",
+                            False,
+                        )
+                        or mp_s5_rk.get("goalsAgainst"),
+                    ),
+                    _box(
+                        "Power Play SV%",
+                        pp_sv_str,
+                        _nhl_pct(
+                            by_str.get("ppSavePct"),
+                            "savesByStrength",
+                            "ppSavePct",
+                            True,
+                            min_gp=3,
+                        )
+                        or mp_sits.get("4on5", {})
+                        .get("backfillRanks", {})
+                        .get("savePct"),
+                    ),
+                    _box(
+                        "PP Shots Against",
+                        _g_or_mp(
+                            str(by_str.get("ppShotsAgainst", "—")),
+                            mp_pk_bf,
+                            "shotsAgainst",
+                        ),
+                        _nhl_pct(
+                            by_str.get("ppShotsAgainst"),
+                            "savesByStrength",
+                            "ppShotsAgainst",
+                        )
+                        or mp_sits.get("4on5", {})
+                        .get("backfillRanks", {})
+                        .get("shotsAgainst"),
+                    ),
+                    _box(
+                        "PP Goals Against",
+                        _g_or_mp(
+                            str(by_str.get("ppGoalsAgainst", "—")),
+                            mp_pk_bf,
+                            "goalsAgainst",
+                        ),
+                        _nhl_pct(
+                            by_str.get("ppGoalsAgainst"),
+                            "savesByStrength",
+                            "ppGoalsAgainst",
+                            False,
+                        )
+                        or mp_sits.get("4on5", {})
+                        .get("backfillRanks", {})
+                        .get("goalsAgainst"),
+                    ),
+                    _box(
+                        "Shorthanded SV%",
+                        sh_sv_str,
+                        _nhl_pct(
+                            by_str.get("shSavePct"),
+                            "savesByStrength",
+                            "shSavePct",
+                            True,
+                            min_gp=3,
+                        )
+                        or mp_sits.get("5on4", {})
+                        .get("backfillRanks", {})
+                        .get("savePct"),
+                    ),
+                    _box(
+                        "SH Shots Against",
+                        _g_or_mp(
+                            str(by_str.get("shShotsAgainst", "—")),
+                            mp_pp_bf,
+                            "shotsAgainst",
+                        ),
+                        _nhl_pct(
+                            by_str.get("shShotsAgainst"),
+                            "savesByStrength",
+                            "shShotsAgainst",
+                        )
+                        or mp_sits.get("5on4", {})
+                        .get("backfillRanks", {})
+                        .get("shotsAgainst"),
+                    ),
                 ],
             },
         ]
@@ -592,22 +901,29 @@ def fetch_player_profile(player_id: int) -> dict[str, Any]:
         pcts = reports.get("percentages") or {}
         toi = reports.get("timeonice") or {}
         pp = reports.get("powerplay") or {}
-        pk = reports.get("penaltykill") or {}
 
         gp = summary.get("gamesPlayed", featured_reg.get("gamesPlayed", 0))
         goals = summary.get("goals", featured_reg.get("goals", 0))
         assists = summary.get("assists", featured_reg.get("assists", 0))
         points = summary.get("points", featured_reg.get("points", 0))
         pm = summary.get("plusMinus", featured_reg.get("plusMinus", 0))
-        toi_pg = _fmt_toi(summary.get("timeOnIcePerGame"))
+
+        toi_sec = summary.get("timeOnIcePerGame")
+        if toi_sec is None:
+            toi_sec = mp_all_bf.get("toiPerGame")
+        toi_pg = _fmt_toi(toi_sec)
 
         headline_kpis = [
-            {"label": "GP", "value": str(gp)},
-            {"label": "Goals", "value": str(goals)},
-            {"label": "Assists", "value": str(assists)},
-            {"label": "Points", "value": str(points), "highlight": True},
-            {"label": "+/-", "value": f"+{pm}" if int(pm or 0) > 0 else str(pm or 0)},
-            {"label": "TOI / GP", "value": toi_pg},
+            _box("GP", str(gp), _nhl_pct(gp, "summary", "gamesPlayed")),
+            _box("Goals", str(goals), _nhl_pct(goals, "summary", "goals")),
+            _box("Assists", str(assists), _nhl_pct(assists, "summary", "assists")),
+            _box("Points", str(points), _nhl_pct(points, "summary", "points"), True),
+            _box(
+                "+/-",
+                f"+{pm}" if int(pm or 0) > 0 else str(pm or 0),
+                _nhl_pct(pm, "summary", "plusMinus"),
+            ),
+            _box("TOI / GP", toi_pg, _nhl_pct(toi_sec, "summary", "timeOnIcePerGame")),
         ]
 
         on_ice_sh = pcts.get("skaterShootingPct5v5", poss.get("onIceShootingPct"))
@@ -618,248 +934,484 @@ def fetch_player_profile(player_id: int) -> dict[str, Any]:
             sv_n = float(on_ice_sv) * (100 if float(on_ice_sv) <= 1 else 1)
             pdo_val = f"{sh_n + sv_n:.1f}"
 
-        def _or_mp(primary: str, mp_key: str) -> str:
+        def _or_mp(primary: str, mp_key: str, src: dict[str, Any] = mp_s5_bf) -> str:
             if primary and primary not in ("—", "— / —"):
                 return primary
-            return mp_backfill.get(mp_key) or primary
+            val = src.get(mp_key)
+            return str(val) if val is not None else primary
+
+        def _num_or_mp(raw: Any, src: dict[str, Any], mp_key: str) -> float | None:
+            if raw is not None:
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    pass
+            fb = src.get(mp_key)
+            if fb is None:
+                return None
+            try:
+                return float(str(fb).replace("%", "").replace("+", ""))
+            except (TypeError, ValueError):
+                return None
+
+        posts_val = int(rt.get("missedShotGoalpost") or 0) + int(
+            rt.get("missedShotCrossbar") or 0
+        )
+        posts_pop = [
+            float(
+                (r.get("missedShotGoalpost") or 0) + (r.get("missedShotCrossbar") or 0)
+            )
+            for r in (league_reports.get("realtime") or [])
+        ]
+
+        sog_val = summary.get("shots", featured_reg.get("shots"))
+        sh_pct_val = summary.get("shootingPct", featured_reg.get("shootingPctg"))
+        gwg_val = summary.get("gameWinningGoals", featured_reg.get("gameWinningGoals"))
+        otg_val = summary.get("otGoals", featured_reg.get("otGoals"))
+        pp_pts_val = summary.get("ppPoints", featured_reg.get("powerPlayPoints"))
+        pp_g_val = summary.get("ppGoals", featured_reg.get("powerPlayGoals"))
+        sh_pts_val = summary.get("shPoints", featured_reg.get("shorthandedPoints"))
+        sh_g_val = summary.get("shGoals", featured_reg.get("shorthandedGoals"))
+        pim_val = summary.get("penaltyMinutes", featured_reg.get("pim"))
+
+        ev_toi_sec = (
+            toi.get("evTimeOnIcePerGame")
+            if toi.get("evTimeOnIcePerGame") is not None
+            else mp_s5_bf.get("toiPerGame")
+        )
+        pp_toi_sec = (
+            toi.get("ppTimeOnIcePerGame")
+            if toi.get("ppTimeOnIcePerGame") is not None
+            else mp_pp_bf.get("toiPerGame")
+        )
+        pk_toi_sec = (
+            toi.get("shTimeOnIcePerGame")
+            if toi.get("shTimeOnIcePerGame") is not None
+            else mp_pk_bf.get("toiPerGame")
+        )
+        avg_shift_sec = (
+            toi.get("timeOnIcePerShift")
+            if toi.get("timeOnIcePerShift") is not None
+            else mp_all_bf.get("avgShiftLen")
+        )
 
         stat_groups = [
             {
                 "title": "Scoring & Shooting",
                 "items": [
-                    {"label": "Points", "value": str(points), "highlight": True},
-                    {"label": "Goals", "value": str(goals)},
-                    {"label": "Assists", "value": str(assists)},
-                    {
-                        "label": "Points / GP",
-                        "value": f"{float(summary.get('pointsPerGame') or 0):.2f}",
-                    },
-                    {
-                        "label": "Even-Strength Goals",
-                        "value": str(summary.get("evGoals", "—")),
-                    },
-                    {
-                        "label": "Even-Strength Points",
-                        "value": str(summary.get("evPoints", "—")),
-                    },
-                    {
-                        "label": "Shots on Goal",
-                        "value": str(
-                            summary.get("shots", featured_reg.get("shots", "—"))
+                    _box(
+                        "Points",
+                        str(points),
+                        _nhl_pct(points, "summary", "points"),
+                        True,
+                    ),
+                    _box("Goals", str(goals), _nhl_pct(goals, "summary", "goals")),
+                    _box(
+                        "Assists", str(assists), _nhl_pct(assists, "summary", "assists")
+                    ),
+                    _box(
+                        "Points / GP",
+                        f"{float(summary.get('pointsPerGame') or 0):.2f}",
+                        _nhl_pct(
+                            summary.get("pointsPerGame"),
+                            "summary",
+                            "pointsPerGame",
+                            True,
+                            min_gp=5,
                         ),
-                    },
-                    {
-                        "label": "Shooting %",
-                        "value": _fmt_pct(
-                            summary.get("shootingPct", featured_reg.get("shootingPctg"))
+                    ),
+                    _box(
+                        "Even-Strength Goals",
+                        _or_mp(str(summary.get("evGoals", "—")), "goals", mp_s5_bf),
+                        _nhl_pct(summary.get("evGoals"), "summary", "evGoals")
+                        or _dist_pct(
+                            _num_or_mp(summary.get("evGoals"), mp_s5_bf, "goals"),
+                            "evGoals",
                         ),
-                    },
-                    {
-                        "label": "Game-Winning Goals",
-                        "value": str(
-                            summary.get(
-                                "gameWinningGoals",
-                                featured_reg.get("gameWinningGoals", "—"),
-                            )
+                    ),
+                    _box(
+                        "Even-Strength Points",
+                        _or_mp(str(summary.get("evPoints", "—")), "points", mp_s5_bf),
+                        _nhl_pct(summary.get("evPoints"), "summary", "evPoints")
+                        or _dist_pct(
+                            _num_or_mp(summary.get("evPoints"), mp_s5_bf, "points"),
+                            "evPoints",
                         ),
-                    },
-                    {
-                        "label": "Overtime Goals",
-                        "value": str(
-                            summary.get("otGoals", featured_reg.get("otGoals", "—"))
+                    ),
+                    _box(
+                        "Shots on Goal",
+                        str(sog_val if sog_val is not None else "—"),
+                        _nhl_pct(sog_val, "summary", "shots"),
+                    ),
+                    _box(
+                        "Shooting %",
+                        _fmt_pct(sh_pct_val),
+                        _nhl_pct(
+                            sh_pct_val, "summary", "shootingPct", True, min_shots=10
                         ),
-                    },
-                    {"label": "First Goals", "value": str(rt.get("firstGoals", "—"))},
-                    {
-                        "label": "Empty-Net Points",
-                        "value": str(rt.get("emptyNetPoints", "—")),
-                    },
+                    ),
+                    _box(
+                        "Game-Winning Goals",
+                        str(gwg_val if gwg_val is not None else "—"),
+                        _nhl_pct(gwg_val, "summary", "gameWinningGoals"),
+                    ),
+                    _box(
+                        "Overtime Goals",
+                        str(otg_val if otg_val is not None else "—"),
+                        _nhl_pct(otg_val, "summary", "otGoals"),
+                    ),
+                    _box(
+                        "First Goals",
+                        str(rt.get("firstGoals", "—")),
+                        _nhl_pct(rt.get("firstGoals"), "realtime", "firstGoals"),
+                    ),
+                    _box(
+                        "Empty-Net Points",
+                        str(rt.get("emptyNetPoints", "—")),
+                        _nhl_pct(
+                            rt.get("emptyNetPoints"), "realtime", "emptyNetPoints"
+                        ),
+                    ),
                 ],
             },
             {
                 "title": "Special Teams & Ice Time",
                 "items": [
-                    {
-                        "label": "PP Points",
-                        "value": str(
-                            summary.get(
-                                "ppPoints", featured_reg.get("powerPlayPoints", "—")
-                            )
+                    _box(
+                        "PP Points",
+                        _or_mp(
+                            str(pp_pts_val if pp_pts_val is not None else "—"),
+                            "points",
+                            mp_pp_bf,
                         ),
-                        "highlight": True,
-                    },
-                    {
-                        "label": "PP Goals",
-                        "value": str(
-                            summary.get(
-                                "ppGoals", featured_reg.get("powerPlayGoals", "—")
-                            )
+                        _nhl_pct(pp_pts_val, "summary", "ppPoints"),
+                        True,
+                    ),
+                    _box(
+                        "PP Goals",
+                        _or_mp(
+                            str(pp_g_val if pp_g_val is not None else "—"),
+                            "goals",
+                            mp_pp_bf,
                         ),
-                    },
-                    {
-                        "label": "PP Primary Assists",
-                        "value": str(pp.get("ppPrimaryAssists", "—")),
-                    },
-                    {
-                        "label": "PP Points / 60",
-                        "value": f"{float(pp['ppPointsPer60']):.2f}"
-                        if pp.get("ppPointsPer60") is not None
-                        else "—",
-                    },
-                    {
-                        "label": "SH Points",
-                        "value": str(
-                            summary.get(
-                                "shPoints", featured_reg.get("shorthandedPoints", "—")
-                            )
+                        _nhl_pct(pp_g_val, "summary", "ppGoals")
+                        or _dist_pct(
+                            _num_or_mp(pp_g_val, mp_pp_bf, "goals"), "ppGoals"
                         ),
-                    },
-                    {
-                        "label": "SH Goals",
-                        "value": str(
-                            summary.get(
-                                "shGoals", featured_reg.get("shorthandedGoals", "—")
-                            )
+                    ),
+                    _box(
+                        "PP Primary Assists",
+                        _or_mp(
+                            str(pp.get("ppPrimaryAssists", "—")),
+                            "primaryAssists",
+                            mp_pp_bf,
                         ),
-                    },
-                    {"label": "Total TOI / GP", "value": toi_pg},
-                    {
-                        "label": "Even-Strength TOI / GP",
-                        "value": _fmt_toi(toi.get("evTimeOnIcePerGame")),
-                    },
-                    {
-                        "label": "Power Play TOI / GP",
-                        "value": _fmt_toi(toi.get("ppTimeOnIcePerGame")),
-                    },
-                    {
-                        "label": "Penalty Kill TOI / GP",
-                        "value": _fmt_toi(toi.get("shTimeOnIcePerGame")),
-                    },
-                    {
-                        "label": "Shifts / GP",
-                        "value": f"{float(toi['shiftsPerGame']):.1f}"
-                        if toi.get("shiftsPerGame") is not None
-                        else "—",
-                    },
-                    {
-                        "label": "Avg Shift Length",
-                        "value": _fmt_toi(toi.get("timeOnIcePerShift")),
-                    },
+                        _dist_pct(
+                            _num_or_mp(
+                                pp.get("ppPrimaryAssists"), mp_pp_bf, "primaryAssists"
+                            ),
+                            "ppPrimaryAssists",
+                        ),
+                    ),
+                    _box(
+                        "PP Points / 60",
+                        _or_mp(
+                            f"{float(pp['ppPointsPer60']):.2f}"
+                            if pp.get("ppPointsPer60") is not None
+                            else "—",
+                            "pointsPer60",
+                            mp_pp_bf,
+                        ),
+                        _dist_pct(
+                            _num_or_mp(
+                                pp.get("ppPointsPer60"), mp_pp_bf, "pointsPer60"
+                            ),
+                            "ppPointsPer60",
+                        ),
+                    ),
+                    _box(
+                        "SH Points",
+                        _or_mp(
+                            str(sh_pts_val if sh_pts_val is not None else "—"),
+                            "points",
+                            mp_pk_bf,
+                        ),
+                        _nhl_pct(sh_pts_val, "summary", "shPoints")
+                        or _dist_pct(
+                            _num_or_mp(sh_pts_val, mp_pk_bf, "points"), "shPoints"
+                        ),
+                    ),
+                    _box(
+                        "SH Goals",
+                        _or_mp(
+                            str(sh_g_val if sh_g_val is not None else "—"),
+                            "goals",
+                            mp_pk_bf,
+                        ),
+                        _nhl_pct(sh_g_val, "summary", "shGoals")
+                        or _dist_pct(
+                            _num_or_mp(sh_g_val, mp_pk_bf, "goals"), "shGoals"
+                        ),
+                    ),
+                    _box(
+                        "Total TOI / GP",
+                        toi_pg,
+                        _nhl_pct(toi_sec, "summary", "timeOnIcePerGame"),
+                    ),
+                    _box(
+                        "Even-Strength TOI / GP",
+                        _fmt_toi(ev_toi_sec),
+                        _dist_pct(ev_toi_sec, "evToiPerGame"),
+                    ),
+                    _box(
+                        "Power Play TOI / GP",
+                        _fmt_toi(pp_toi_sec),
+                        _dist_pct(pp_toi_sec, "ppToiPerGame"),
+                    ),
+                    _box(
+                        "Penalty Kill TOI / GP",
+                        _fmt_toi(pk_toi_sec),
+                        _dist_pct(pk_toi_sec, "pkToiPerGame"),
+                    ),
+                    _box(
+                        "Shifts / GP",
+                        _or_mp(
+                            f"{float(toi['shiftsPerGame']):.1f}"
+                            if toi.get("shiftsPerGame") is not None
+                            else "—",
+                            "shiftsPerGame",
+                            mp_all_bf,
+                        ),
+                        _dist_pct(
+                            _num_or_mp(
+                                toi.get("shiftsPerGame"), mp_all_bf, "shiftsPerGame"
+                            ),
+                            "shiftsPerGame",
+                        ),
+                    ),
+                    _box(
+                        "Avg Shift Length",
+                        _fmt_toi(avg_shift_sec),
+                        _dist_pct(avg_shift_sec, "avgShiftLen"),
+                    ),
                 ],
             },
             {
                 "title": "Possession & On-Ice Analytics (5v5)",
                 "items": [
-                    {
-                        "label": "Corsi / SAT %",
-                        "value": _or_mp(
+                    _box(
+                        "Corsi / SAT %",
+                        _or_mp(
                             _fmt_pct(poss.get("satPct", pcts.get("satPct5v5"))),
                             "satPct",
                         ),
-                        "highlight": True,
-                    },
-                    {
-                        "label": "SAT Relative %",
-                        "value": _or_mp(
+                        mp_s5_rk.get("satPct"),
+                        True,
+                    ),
+                    _box(
+                        "SAT Relative %",
+                        _or_mp(
                             f"{float(poss['satRelative']):+.1f}%"
                             if poss.get("satRelative") is not None
                             else "—",
                             "satRel",
                         ),
-                    },
-                    {
-                        "label": "Fenwick / USAT %",
-                        "value": _or_mp(
+                        mp_s5_rk.get("satRel"),
+                    ),
+                    _box(
+                        "Fenwick / USAT %",
+                        _or_mp(
                             _fmt_pct(poss.get("usatPct", pcts.get("usatPct5v5"))),
                             "usatPct",
                         ),
-                    },
-                    {
-                        "label": "USAT Relative %",
-                        "value": _or_mp(
+                        mp_s5_rk.get("usatPct"),
+                    ),
+                    _box(
+                        "USAT Relative %",
+                        _or_mp(
                             f"{float(poss['usatRelative']):+.1f}%"
                             if poss.get("usatRelative") is not None
                             else "—",
                             "usatRel",
                         ),
-                    },
-                    {
-                        "label": "SAT For / Against",
-                        "value": _or_mp(
+                        mp_s5_rk.get("usatRel"),
+                    ),
+                    _box(
+                        "SAT For / Against",
+                        _or_mp(
                             f"{poss.get('satFor', '—')} / {poss.get('satAgainst', '—')}",
                             "satForAgainst",
                         ),
-                    },
-                    {
-                        "label": "SAT % Close",
-                        "value": _or_mp(
-                            _fmt_pct(poss.get("satPctClose")),
-                            "satPctClose",
-                        ),
-                    },
-                    {
-                        "label": "Offensive Zone Start %",
-                        "value": _or_mp(
+                        mp_s5_rk.get("satForAgainst"),
+                    ),
+                    _box(
+                        "SAT % Close",
+                        _or_mp(_fmt_pct(poss.get("satPctClose")), "satPctClose"),
+                        mp_s5_rk.get("satPctClose"),
+                    ),
+                    _box(
+                        "Offensive Zone Start %",
+                        _or_mp(
                             _fmt_pct(
                                 poss.get("zoneStartPct", pcts.get("zoneStartPct5v5"))
                             ),
                             "ozStartPct",
                         ),
-                    },
-                    {
-                        "label": "On-Ice Shooting %",
-                        "value": _or_mp(_fmt_pct(on_ice_sh), "onIceShPct"),
-                    },
-                    {
-                        "label": "On-Ice Save %",
-                        "value": _or_mp(_fmt_pct(on_ice_sv), "onIceSvPct"),
-                    },
-                    {
-                        "label": "PDO (5v5)",
-                        "value": _or_mp(pdo_val or "—", "pdo"),
-                    },
+                        mp_s5_rk.get("ozStartPct"),
+                    ),
+                    _box(
+                        "On-Ice Shooting %",
+                        _or_mp(_fmt_pct(on_ice_sh), "onIceShPct"),
+                        mp_s5_rk.get("onIceShPct"),
+                    ),
+                    _box(
+                        "On-Ice Save %",
+                        _or_mp(_fmt_pct(on_ice_sv), "onIceSvPct"),
+                        mp_s5_rk.get("onIceSvPct"),
+                    ),
+                    _box(
+                        "PDO (5v5)", _or_mp(pdo_val or "—", "pdo"), mp_s5_rk.get("pdo")
+                    ),
                 ],
             },
             {
                 "title": "Physical, Micro-Stats & Discipline",
                 "items": [
-                    {"label": "Hits", "value": str(rt.get("hits", "—"))},
-                    {
-                        "label": "Hits / 60",
-                        "value": f"{float(rt['hitsPer60']):.2f}"
-                        if rt.get("hitsPer60") is not None
-                        else "—",
-                    },
-                    {
-                        "label": "Blocked Shots",
-                        "value": str(rt.get("blockedShots", "—")),
-                    },
-                    {
-                        "label": "Blocks / 60",
-                        "value": f"{float(rt['blockedShotsPer60']):.2f}"
-                        if rt.get("blockedShotsPer60") is not None
-                        else "—",
-                    },
-                    {"label": "Takeaways", "value": str(rt.get("takeaways", "—"))},
-                    {"label": "Giveaways", "value": str(rt.get("giveaways", "—"))},
-                    {"label": "Missed Shots", "value": str(rt.get("missedShots", "—"))},
-                    {
-                        "label": "Posts / Crossbars",
-                        "value": str(
-                            int(rt.get("missedShotGoalpost") or 0)
-                            + int(rt.get("missedShotCrossbar") or 0)
+                    _box(
+                        "Hits",
+                        _or_mp(str(rt.get("hits", "—")), "hits", mp_all_bf),
+                        _nhl_pct(rt.get("hits"), "realtime", "hits")
+                        or _dist_pct(
+                            _num_or_mp(rt.get("hits"), mp_all_bf, "hits"), "hits"
                         ),
-                    },
-                    {
-                        "label": "Faceoff Win %",
-                        "value": _fmt_pct(summary.get("faceoffWinPct")),
-                    },
-                    {
-                        "label": "Penalty Minutes",
-                        "value": str(
-                            summary.get("penaltyMinutes", featured_reg.get("pim", "—"))
+                    ),
+                    _box(
+                        "Hits / 60",
+                        _or_mp(
+                            f"{float(rt['hitsPer60']):.2f}"
+                            if rt.get("hitsPer60") is not None
+                            else "—",
+                            "hitsPer60",
+                            mp_all_bf,
                         ),
-                    },
+                        _nhl_pct(
+                            rt.get("hitsPer60"), "realtime", "hitsPer60", True, min_gp=5
+                        )
+                        or _dist_pct(
+                            _num_or_mp(rt.get("hitsPer60"), mp_all_bf, "hitsPer60"),
+                            "hitsPer60",
+                        ),
+                    ),
+                    _box(
+                        "Blocked Shots",
+                        _or_mp(
+                            str(rt.get("blockedShots", "—")), "blockedShots", mp_all_bf
+                        ),
+                        _nhl_pct(rt.get("blockedShots"), "realtime", "blockedShots")
+                        or _dist_pct(
+                            _num_or_mp(
+                                rt.get("blockedShots"), mp_all_bf, "blockedShots"
+                            ),
+                            "blockedShots",
+                        ),
+                    ),
+                    _box(
+                        "Blocks / 60",
+                        _or_mp(
+                            f"{float(rt['blockedShotsPer60']):.2f}"
+                            if rt.get("blockedShotsPer60") is not None
+                            else "—",
+                            "blocksPer60",
+                            mp_all_bf,
+                        ),
+                        _nhl_pct(
+                            rt.get("blockedShotsPer60"),
+                            "realtime",
+                            "blockedShotsPer60",
+                            True,
+                            min_gp=5,
+                        )
+                        or _dist_pct(
+                            _num_or_mp(
+                                rt.get("blockedShotsPer60"), mp_all_bf, "blocksPer60"
+                            ),
+                            "blocksPer60",
+                        ),
+                    ),
+                    _box(
+                        "Takeaways",
+                        _or_mp(str(rt.get("takeaways", "—")), "takeaways", mp_all_bf),
+                        _nhl_pct(rt.get("takeaways"), "realtime", "takeaways")
+                        or _dist_pct(
+                            _num_or_mp(rt.get("takeaways"), mp_all_bf, "takeaways"),
+                            "takeaways",
+                        ),
+                    ),
+                    _box(
+                        "Giveaways",
+                        _or_mp(str(rt.get("giveaways", "—")), "giveaways", mp_all_bf),
+                        _nhl_pct(
+                            rt.get("giveaways"),
+                            "realtime",
+                            "giveaways",
+                            False,
+                            min_gp=5,
+                        )
+                        or _dist_pct(
+                            _num_or_mp(rt.get("giveaways"), mp_all_bf, "giveaways"),
+                            "giveaways",
+                            False,
+                        ),
+                    ),
+                    _box(
+                        "Missed Shots",
+                        _or_mp(
+                            str(rt.get("missedShots", "—")), "missedShots", mp_all_bf
+                        ),
+                        _nhl_pct(rt.get("missedShots"), "realtime", "missedShots")
+                        or _dist_pct(
+                            _num_or_mp(rt.get("missedShots"), mp_all_bf, "missedShots"),
+                            "missedShots",
+                        ),
+                    ),
+                    _box(
+                        "Posts / Crossbars",
+                        str(posts_val),
+                        _pctile_str(posts_val, posts_pop),
+                    ),
+                    _box(
+                        "Faceoff Win %",
+                        _or_mp(
+                            _fmt_pct(summary.get("faceoffWinPct")),
+                            "faceoffWinPct",
+                            mp_all_bf,
+                        ),
+                        _nhl_pct(
+                            summary.get("faceoffWinPct"),
+                            "summary",
+                            "faceoffWinPct",
+                            True,
+                            min_gp=5,
+                        )
+                        or _dist_pct(
+                            _num_or_mp(
+                                summary.get("faceoffWinPct"), mp_all_bf, "faceoffWinPct"
+                            ),
+                            "faceoffWinPct",
+                        ),
+                    ),
+                    _box(
+                        "Penalty Minutes",
+                        _or_mp(
+                            str(pim_val if pim_val is not None else "—"),
+                            "pim",
+                            mp_all_bf,
+                        ),
+                        _nhl_pct(pim_val, "summary", "penaltyMinutes", False, min_gp=5)
+                        or _dist_pct(
+                            _num_or_mp(pim_val, mp_all_bf, "pim"), "pim", False
+                        ),
+                    ),
                 ],
             },
         ]
