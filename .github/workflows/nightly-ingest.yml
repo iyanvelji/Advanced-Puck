@@ -2,8 +2,12 @@ name: Nightly NHL & MoneyPuck Ingest
 
 on:
   schedule:
-    # 3:05 AM MST (10:05 UTC). During summer MDT this runs at 4:05 AM MDT.
-    - cron: "5 10 * * *"
+    # 12:17 AM Mountain Time (automatically adjusts for MST/MDT)
+    - cron: "17 0 * * *"
+      timezone: "America/Edmonton"
+    # 3:17 AM Mountain Time (automatically adjusts for MST/MDT)
+    - cron: "17 3 * * *"
+      timezone: "America/Edmonton"
   workflow_dispatch: # Lets you trigger a manual run anytime from the Actions tab
 
 jobs:
